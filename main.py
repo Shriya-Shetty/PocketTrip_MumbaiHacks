@@ -3,6 +3,7 @@ from supabase import create_client, Client
 import google.generativeai as genai
 import json
 import os
+import uuid
 
 # 🎨 Page Setup
 st.set_page_config(page_title="PocketTrip AI", page_icon="✈️", layout="wide")
@@ -94,28 +95,29 @@ def display_trip(trip):
 def home_page():
     st.header("✈️ PocketTrip Planner")
     
-    phone = st.text_input("Enter your phone number:")
-    username = st.text_input("Enter your username:")
-    
-    if st.button("Login"):
-        user = get_user_by_phone(phone)
-        if not user:
-            user = create_user(phone, username)
-            st.session_state.user = user
-            st.success("New user created!")
-        else:
-            st.session_state.user = user
-            st.success(f"Welcome back, {user['username']}!")
-
-    if "user" in st.session_state:
+    if "user" not in st.session_state or st.session_state.user is None:
+        # User Login/Signup
+        phone = st.text_input("Enter your phone number:")
+        username = st.text_input("Enter your username:")
+        
+        if st.button("Login"):
+            user = get_user_by_phone(phone)
+            if not user:
+                user = create_user(phone, username)
+                st.session_state.user = user
+                st.success("New user created!")
+            else:
+                st.session_state.user = user
+                st.success(f"Welcome back, {user['username']}!")
+    else:
         # Once the user is logged in
         uid = st.session_state.user["id"]
-        
+
         with st.form("trip_form"):
             loc = st.text_input("Destination:")
             days = st.number_input("Duration (days):", 1, 30, 3)
             budget = st.number_input("Budget ($):", 100, 50000, 1000)
-            interests = st.multiselect("Interests:", ["Beach","Adventure","Culture","Food","Shopping"])
+            interests = st.multiselect("Interests:", ["Beach", "Adventure", "Culture", "Food", "Shopping"])
             special = st.text_area("Special requests:")
             submit = st.form_submit_button("Generate Plan")
             if submit and loc:
@@ -154,12 +156,7 @@ def home_page():
 
 # 🚀 Main
 def main():
-    if "user" not in st.session_state:
-        st.session_state.user = None
-    if not st.session_state.user:
-        home_page()
-    else:
-        home_page()
+    home_page()
 
 if __name__ == "__main__":
     main()
