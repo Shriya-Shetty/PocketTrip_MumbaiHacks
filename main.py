@@ -10,7 +10,7 @@ import random
 
 # Page config
 st.set_page_config(
-    page_title="PocketTrip AI - Collaborative Day Planner",
+    page_title="PocketTrip",
     page_icon="✈️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -37,12 +37,13 @@ st.markdown("""
         box-shadow: 0 10px 30px rgba(0,0,0,0.3);
     }
     .plan-card {
-        background: white;
+        background: #f8f9fa;
         padding: 1.5rem;
         border-radius: 10px;
         border-left: 5px solid #667eea;
         margin: 1rem 0;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        color: #333;
     }
     .vote-badge {
         background: #ffd700;
@@ -58,6 +59,31 @@ st.markdown("""
         border-radius: 8px;
         margin: 0.2rem;
         display: inline-block;
+        color: #333;
+    }
+    .chat-user {
+        background: #e3f2fd;
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+        color: #1565c0;
+        border-left: 4px solid #1976d2;
+    }
+    .chat-assistant {
+        background: #f3e5f5;
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+        color: #4a148c;
+        border-left: 4px solid #7b1fa2;
+    }
+    .split-summary {
+        background: #fff3e0;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+        color: #e65100;
+        border: 2px solid #ff9800;
     }
     .stButton>button {
         background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
@@ -271,16 +297,16 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
     Create a detailed ONE-DAY trip plan with these parameters:
     Current Location: {current_location}
     Search Radius: {radius} km
-    Budget: ${budget}
+    Budget: ₹{budget}
     Interests: {', '.join(interests)}
     Additional Info: {additional_info}
     
-    Provide a JSON response with:
+    Provide a JSON response with realistic costs in Indian Rupees (₹):
     1. Exact destinations within the radius with addresses
     2. Time-based itinerary (morning, afternoon, evening)
-    3. Detailed budget breakdown for each activity (transport, food, entry fees, misc)
+    3. Detailed budget breakdown including TRAVEL COSTS (cab/auto/metro fares between locations)
     4. Precise cost estimates for each destination
-    5. Travel time between locations
+    5. Travel time and transport costs between locations
     6. Practical tips
     
     Format as valid JSON:
@@ -295,12 +321,17 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
                 "duration": "2 hours",
                 "activities": ["Activity 1", "Activity 2"],
                 "costs": {{
-                    "entry": 20,
-                    "food": 15,
-                    "transport": 10,
-                    "misc": 5
+                    "entry": 200,
+                    "food": 300,
+                    "transport": 150,
+                    "misc": 100
                 }},
-                "total_cost": 50
+                "total_cost": 750,
+                "transport_from_previous": {{
+                    "mode": "Metro/Cab/Auto",
+                    "cost": 150,
+                    "time": "30 mins"
+                }}
             }}
         ],
         "itinerary": {{
@@ -309,14 +340,16 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
             "evening": ["6:00 PM - Activity 4", "8:00 PM - Dinner"]
         }},
         "total_budget": {{
-            "transport": 50,
-            "food": 100,
-            "activities": 80,
-            "miscellaneous": 20,
-            "total": 250
+            "transport": 500,
+            "food": 800,
+            "activities": 600,
+            "miscellaneous": 200,
+            "total": 2100
         }},
         "tips": ["Tip 1", "Tip 2"]
     }}
+    
+    Make sure to include realistic Indian prices and transport costs between each location.
     """
     
     try:
@@ -339,8 +372,9 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
                 "time_slot": "all-day",
                 "duration": "8 hours",
                 "activities": ["Sightseeing", "Local experiences"],
-                "costs": {"entry": budget * 0.3, "food": budget * 0.4, "transport": budget * 0.2, "misc": budget * 0.1},
-                "total_cost": budget
+                "costs": {"entry": budget * 0.25, "food": budget * 0.35, "transport": budget * 0.25, "misc": budget * 0.15},
+                "total_cost": budget,
+                "transport_from_previous": {"mode": "Metro/Cab", "cost": budget * 0.1, "time": "30 mins"}
             }],
             "itinerary": {
                 "morning": ["9:00 AM - Start exploration"],
@@ -348,10 +382,10 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
                 "evening": ["6:00 PM - Evening activities"]
             },
             "total_budget": {
-                "transport": budget * 0.2,
-                "food": budget * 0.4,
-                "activities": budget * 0.3,
-                "miscellaneous": budget * 0.1,
+                "transport": budget * 0.25,
+                "food": budget * 0.35,
+                "activities": budget * 0.25,
+                "miscellaneous": budget * 0.15,
                 "total": budget
             },
             "tips": ["Book in advance", "Check weather", "Carry cash"]
@@ -392,7 +426,7 @@ def combine_plans(plans_data):
 
 def process_expense_split(message, room_expenses_context):
     prompt = f"""
-    You are SplitSense AI for group expense splitting.
+    You are SplitSense AI for group expense splitting. Use Indian Rupees (₹) for all amounts.
     
     Previous expenses in this room:
     {json.dumps(room_expenses_context, indent=2)}
@@ -400,12 +434,12 @@ def process_expense_split(message, room_expenses_context):
     New message: {message}
     
     Parse the expense and:
-    1. Extract: amount, who paid, who shares the cost
+    1. Extract: amount in ₹, who paid, who shares the cost
     2. Calculate equal splits
     3. Update running balances
-    4. Show who owes whom
+    4. Show who owes whom in ₹
     
-    Be conversational and clear. Format with currency symbols.
+    Be conversational and clear. Format all amounts with ₹ symbol.
     """
     
     try:
@@ -429,7 +463,7 @@ def login_page():
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
-        st.markdown('<h1 class="main-header">✈️ PocketTrip AI</h1>', unsafe_allow_html=True)
+        st.markdown('<h1 class="main-header">✈️ PocketTrip</h1>', unsafe_allow_html=True)
         st.markdown("### Collaborative Day Trip Planner")
         
         tab1, tab2 = st.tabs(["Login", "Sign Up"])
@@ -605,14 +639,14 @@ def planning_page():
                             st.markdown("**Destinations:**")
                             for dest in plan_data['destinations']:
                                 st.markdown(f"📍 **{dest['name']}** ({dest.get('distance_km', '?')} km)")
-                                st.caption(f"Time: {dest.get('time_slot', 'TBD')} | Cost: ${dest.get('total_cost', 0)}")
+                                st.caption(f"Time: {dest.get('time_slot', 'TBD')} | Cost: ₹{dest.get('total_cost', 0)}")
                         
                         if 'total_budget' in plan_data:
                             st.markdown("**Budget Breakdown:**")
                             budget = plan_data['total_budget']
                             cols = st.columns(len(budget))
                             for idx, (cat, amt) in enumerate(budget.items()):
-                                cols[idx].metric(cat.title(), f"${amt}")
+                                cols[idx].metric(cat.title(), f"₹{amt}")
                     
                     with col_b:
                         if st.button("👍 Vote", key=f"vote_{plan['id']}", use_container_width=True):
@@ -641,20 +675,20 @@ def planning_page():
                 if 'destinations' in combined:
                     st.markdown("### 🗺️ Merged Destinations")
                     for dest in combined['destinations']:
-                        st.markdown(f'<div class="plan-card"><strong>{dest["name"]}</strong><br>📍 {dest.get("address", "N/A")}<br>⏰ {dest.get("time_slot", "TBD")} | 💰 ${dest.get("total_cost", 0)}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="plan-card"><strong>{dest["name"]}</strong><br>📍 {dest.get("address", "N/A")}<br>⏰ {dest.get("time_slot", "TBD")} | 💰 ₹{dest.get("total_cost", 0)}</div>', unsafe_allow_html=True)
                 
                 if 'total_budget' in combined:
                     st.markdown("### 💰 Combined Budget")
                     cols = st.columns(len(combined['total_budget']))
                     for idx, (cat, amt) in enumerate(combined['total_budget'].items()):
-                        cols[idx].metric(cat.title(), f"${amt}")
+                        cols[idx].metric(cat.title(), f"₹{amt}")
         else:
             st.info("Need at least 2 plans to combine. Create more plans!")
 
 # SplitSense Page
 def splitsense_page():
     room = st.session_state.current_room
-    st.markdown('<h1 class="main-header">💸 SplitSense</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">💸 SplitSense AI</h1>', unsafe_allow_html=True)
     st.markdown(f"### Room: {room['room_name']}")
     
     if st.button("← Back to Planning"):
@@ -670,10 +704,11 @@ def splitsense_page():
         
         expenses = get_room_expenses(room['id'])
         for exp in expenses:
-            st.markdown(f'<div class="plan-card"><strong>{exp["username"]}:</strong> {exp["message"]}<br><br>{exp["response"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-user"><strong>{exp["username"]}:</strong><br>{exp["message"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-assistant"><strong>SplitSense AI:</strong><br>{exp["response"]}</div>', unsafe_allow_html=True)
         
         with st.form("expense_form", clear_on_submit=True):
-            message = st.text_input("Enter expense", placeholder="I paid $50 for lunch, split among 4 people")
+            message = st.text_input("Enter expense", placeholder="I paid ₹500 for lunch, split among 4 people")
             send = st.form_submit_button("Send", use_container_width=True)
             
             if send and message:
@@ -682,18 +717,71 @@ def splitsense_page():
                     response = process_expense_split(message, context)
                     save_expense_message(room['id'], st.session_state.user['id'], message, response)
                     st.rerun()
+        
+        st.divider()
+        
+        # Calculate Split Button
+        if st.button("📊 Calculate Split", use_container_width=True, type="primary"):
+            if expenses:
+                with st.spinner("Calculating final splits..."):
+                    # Get all room members
+                    members = get_room_members(room['id'])
+                    member_names = [m['username'] for m in members]
+                    
+                    # Create context for AI to calculate final balances
+                    split_prompt = f"""
+                    Based on all these expense messages, calculate the final settlement for everyone:
+                    
+                    Room members: {', '.join(member_names)}
+                    
+                    Expense history:
+                    {json.dumps([{'user': e['username'], 'message': e['message']} for e in expenses], indent=2)}
+                    
+                    Provide a clear summary in Indian Rupees (₹):
+                    1. Total expenses
+                    2. Each person's share
+                    3. Who owes whom and exact amounts
+                    4. Simplified settlements (minimize number of transactions)
+                    
+                    Format it clearly with proper headings and use ₹ symbol for all amounts.
+                    """
+                    
+                    final_split = model.generate_content(split_prompt).text
+                    st.session_state['final_split'] = final_split
+                    st.rerun()
+        
+        # Display final split summary
+        if 'final_split' in st.session_state and st.session_state.get('final_split'):
+            st.markdown("---")
+            st.markdown("### 💰 Final Settlement Summary")
+            st.markdown(f'<div class="split-summary">{st.session_state["final_split"]}</div>', unsafe_allow_html=True)
+            
+            if st.button("✅ Clear Settlement", use_container_width=True):
+                st.session_state['final_split'] = None
+                st.rerun()
     
     with col2:
         st.markdown("### 💡 Quick Guide")
-        st.info("💬 Examples:\n\n- 'I paid $100 for tickets'\n- 'Split $50 among 3 people'\n- 'John owes me $25'\n- 'What's everyone's balance?'")
+        st.info("💬 Examples:\n\n- 'I paid ₹500 for tickets'\n- 'Split ₹800 among 3 people'\n- 'Rahul owes me ₹250'\n- 'What's everyone's balance?'")
         
-        if st.button("🗑️ Clear Chat", use_container_width=True):
+        # Show member list
+        st.markdown("### 👥 Room Members")
+        members = get_room_members(room['id'])
+        for member in members:
+            st.markdown(f'<div class="member-badge">👤 {member["username"]}</div>', unsafe_allow_html=True)
+        
+        st.divider()
+        
+        if st.button("🗑️ Clear All Expenses", use_container_width=True):
             try:
                 supabase.table('split_expenses').delete().eq('room_id', room['id']).execute()
-                st.success("Chat cleared!")
+                if 'final_split' in st.session_state:
+                    st.session_state['final_split'] = None
+                st.success("All expenses cleared!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
+
 
 # Main Router
 def main():
