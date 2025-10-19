@@ -273,8 +273,3 @@ def process_expense_split(message, room_expenses_context):
 - Debt graph optimization (minimizes transactions)
 - Real-time balance updates
 - Settlement instructions generation
-
-**Fintech Application:** Payment orchestration and clearing house operations
-```python
-# In init_gemini() function
-return genai.GenerativeModel('
