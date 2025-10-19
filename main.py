@@ -464,7 +464,7 @@ def login_page():
     
     with col2:
         st.markdown('<h1 class="main-header">✈️ PocketTrip</h1>', unsafe_allow_html=True)
-        st.markdown("### Collaborative Day Trip Planner")
+        st.markdown("### PocketTrip Collaborative Day Trip Planner And Expense Tracker")
         
         tab1, tab2 = st.tabs(["Login", "Sign Up"])
         
