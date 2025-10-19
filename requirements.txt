@@ -1,0 +1,4 @@
+streamlit==1.31.0
+google-generativeai==0.4.0
+supabase==1.0.3
+postgrest==0.10.6
