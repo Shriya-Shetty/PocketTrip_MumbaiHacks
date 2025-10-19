@@ -1,91 +1,147 @@
 import streamlit as st
 from supabase import create_client, Client
 import google.generativeai as genai
+import json
+from datetime import datetime
 import os
 
-# -------------------------
-# CONFIGURATION
-# -------------------------
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://your-project.supabase.co")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "your-supabase-anon-key")
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "your-gemini-api-key")
+# 🎨 Page Setup
+st.set_page_config(page_title="PocketTrip AI", page_icon="✈️", layout="wide")
 
-# Initialize clients
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+# 🧩 Init Supabase + Gemini
+@st.cache_resource
+def init_supabase():
+    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
-st.set_page_config(page_title="PocketTrip AI SQL Editor", page_icon="📱", layout="wide")
-st.title("📱 PocketTrip AI + Supabase Login")
+@st.cache_resource
+def init_gemini():
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    return genai.GenerativeModel("gemini-2.5-flash")
 
-# -------------------------
-# SESSION MANAGEMENT
-# -------------------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+supabase: Client = init_supabase()
+model = init_gemini()
 
-# -------------------------
-# LOGIN USING PHONE OTP
-# -------------------------
-def phone_login():
-    st.subheader("🔐 Login using Phone OTP")
+# 🧠 Generate Trip Plan
+def generate_trip_plan(location, duration, budget, interests, special_requests):
+    prompt = f"""
+    Plan a trip to {location} for {duration} days with a ${budget} budget.
+    Interests: {', '.join(interests)}.
+    Special requests: {special_requests}.
+    Return a JSON with daily itinerary, budget breakdown, and recommendations.
+    """
+    response = model.generate_content(prompt)
+    try:
+        text = response.text
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0]
+        return json.loads(text.strip())
+    except:
+        return {
+            "daily_itinerary": [{"day": i+1, "activities": [{"activity": "Explore", "cost": budget//duration}]} for i in range(duration)],
+            "budget_breakdown": {"stay": budget*0.3, "food": budget*0.3, "travel": budget*0.2, "misc": budget*0.2},
+            "recommendations": ["Visit main attractions", "Try local cuisine"]
+        }
 
-    phone = st.text_input("Enter your phone number (with country code):", placeholder="+91XXXXXXXXXX")
+# 👥 Save user profile (auto-sync)
+def sync_user_profile(user):
+    phone = user.phone
+    uid = user.id
+    existing = supabase.table("users").select("id").eq("id", uid).execute()
+    if not existing.data:
+        supabase.table("users").insert({"id": uid, "phone": phone}).execute()
 
-    if st.button("Send OTP"):
-        if not phone.strip():
-            st.warning("Please enter your phone number first.")
+# 🧭 Trip Creation
+def create_trip(owner_id, trip_data):
+    result = supabase.table("trips").insert({
+        "owner_id": owner_id,
+        "trip_data": json.dumps(trip_data)
+    }).execute()
+    trip_id = result.data[0]["id"]
+    supabase.table("trip_members").insert({"trip_id": trip_id, "user_id": owner_id}).execute()
+    return trip_id
+
+# 🧑‍💻 Chat Interaction
+def send_message_to_chatbot(user_id, trip_id, message):
+    # Generate response from Gemini 2.5
+    prompt = f"User asks: {message}\nProvide a helpful response regarding the trip plan."
+    response = model.generate_content(prompt)
+    response_text = response.text.strip()
+
+    # Store in database
+    supabase.table("chat_messages").insert({
+        "trip_id": trip_id,
+        "user_id": user_id,
+        "message": message,
+        "response": response_text
+    }).execute()
+
+    return response_text
+
+# 🗺️ Display Chat and Handle Interaction
+def chat_with_bot(user_id, trip_id):
+    st.subheader("💬 Chat with Trip Planner")
+    message = st.text_input("Ask me anything about your trip:")
+    if st.button("Send"):
+        if message:
+            response = send_message_to_chatbot(user_id, trip_id, message)
+            st.write(f"**You**: {message}")
+            st.write(f"**AI**: {response}")
         else:
-            try:
-                # Request Supabase to send OTP
-                response = supabase.auth.sign_in_with_otp({"phone": phone})
-                st.session_state.phone = phone
-                st.info("✅ OTP sent successfully. Check your SMS.")
-            except Exception as e:
-                st.error(f"Error sending OTP: {str(e)}")
+            st.warning("Please type a message to send.")
 
-    otp = st.text_input("Enter OTP you received:")
+# 🏠 Home Page
+def home_page():
+    st.header("✈️ PocketTrip Planner")
+    uid = st.session_state.user.id
+    sync_user_profile(st.session_state.user)
 
-    if st.button("Verify OTP"):
-        try:
-            data = supabase.auth.verify_otp({"phone": st.session_state.phone, "token": otp, "type": "sms"})
-            st.session_state.user = data.user
-            st.success("🎉 Logged in successfully!")
-        except Exception as e:
-            st.error(f"Verification failed: {str(e)}")
+    with st.form("trip_form"):
+        loc = st.text_input("Destination:")
+        days = st.number_input("Duration (days):", 1, 30, 3)
+        budget = st.number_input("Budget ($):", 100, 50000, 1000)
+        interests = st.multiselect("Interests:", ["Beach","Adventure","Culture","Food","Shopping"])
+        special = st.text_area("Special requests:")
+        submit = st.form_submit_button("Generate Plan")
+        if submit and loc:
+            with st.spinner("✨ Generating your plan..."):
+                plan = generate_trip_plan(loc, days, budget, interests, special)
+                plan["location"] = loc
+                plan["budget"] = budget
+                plan["duration"] = days
+                tid = create_trip(uid, plan)
+                st.success("✅ Trip created!")
+                st.session_state.current_trip = {"id": tid, "trip_data": json.dumps(plan)}
+                st.rerun()
 
-# -------------------------
-# MAIN DASHBOARD
-# -------------------------
-def ai_dashboard():
-    st.sidebar.header("Menu")
-    if st.sidebar.button("Logout"):
-        supabase.auth.sign_out()
+    # Display trips
+    trips = supabase.table("trips").select("*").execute().data
+    if trips:
+        st.divider()
+        st.subheader("📋 My Trips")
+        for t in trips:
+            if st.button(f"Open: {json.loads(t['trip_data']).get('location','Trip')}", key=t["id"]):
+                st.session_state.current_trip = t
+                st.rerun()
+
+    if st.session_state.current_trip:
+        st.divider()
+        display_trip(st.session_state.current_trip)
+        chat_with_bot(uid, st.session_state.current_trip["id"])
+
+    if st.button("🚪 Logout"):
+        st.session_state.authenticated = False
         st.session_state.user = None
+        st.session_state.current_trip = None
         st.rerun()
 
-    st.subheader("💬 Chat with Gemini 2.5 Flash")
-    prompt = st.text_area("Ask anything...")
-
-    if st.button("Ask AI"):
-        if not prompt.strip():
-            st.warning("Enter a question first.")
-        else:
-            try:
-                response = model.generate_content(prompt)
-                st.markdown("### 🤖 Gemini's Answer:")
-                st.markdown(response.text)
-            except Exception as e:
-                st.error(f"Gemini API error: {str(e)}")
-
-# -------------------------
-# MAIN
-# -------------------------
+# 🚀 Main
 def main():
-    if st.session_state.user is None:
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
         phone_login()
     else:
-        ai_dashboard()
+        home_page()
 
 if __name__ == "__main__":
     main()
