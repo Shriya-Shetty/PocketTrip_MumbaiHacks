@@ -32,7 +32,7 @@
 | Component | Technology |
 |-----------|------------|
 | **Frontend** | Streamlit (Python) |
-| **AI Model** | Google Gemini 2.0 Flash |
+| **AI Model** | Google Gemini 2.5 Flash |
 | **Database** | Supabase (PostgreSQL) |
 | **Authentication** | Custom (SHA-256) |
 | **Deployment** | Streamlit Cloud |
@@ -61,7 +61,7 @@ split_expenses  → Expense chat history per room (message, response)
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/pockettrip.git
+   git clone https://github.com/Shriya-Shetty/PocketTrip_MumbaiHacks.git
    cd pockettrip
    ```
 
