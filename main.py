@@ -1,3 +1,4 @@
+# main.py - Complete PocketTrip Streamlit app with Gemini fallback + retries
 import streamlit as st
 import google.generativeai as genai
 from supabase import create_client, Client
@@ -7,6 +8,7 @@ import os
 import hashlib
 import string
 import random
+import time
 
 # Page config
 st.set_page_config(
@@ -101,38 +103,94 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------------------
 # Initialize Supabase
+# ---------------------------
 @st.cache_resource
 def init_supabase():
     try:
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
         if not url or not key:
-            st.error("⚠️ Supabase credentials not found. Please configure environment variables.")
+            st.error("⚠️ Supabase credentials not found. Please configure SUPABASE_URL and SUPABASE_KEY environment variables.")
             st.stop()
         return create_client(url, key)
     except Exception as e:
         st.error(f"Error connecting to Supabase: {e}")
         st.stop()
 
-# Initialize Gemini
+# ---------------------------
+# Initialize Gemini with fallback + model selection
+# ---------------------------
 @st.cache_resource
 def init_gemini():
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            st.error("⚠️ Gemini API key not found. Please configure environment variables.")
-            st.stop()
-        genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-2.0-flash-exp')
-    except Exception as e:
-        st.error(f"Error initializing Gemini: {e}")
+    """
+    Reads GEMINI_API_KEY and optional GEMINI_MODEL env var.
+    If the requested model fails (quota or other), auto-fallback to gemini-1.5-flash.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    requested_model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")  # default to free-tier compatible
+    if not api_key:
+        st.error("⚠️ Gemini API key not found. Please configure GEMINI_API_KEY environment variable.")
         st.stop()
 
+    # configure global
+    try:
+        genai.configure(api_key=api_key)
+    except Exception as e:
+        st.error(f"Error configuring Gemini client: {e}")
+        st.stop()
+
+    # try to instantiate the requested model; if it fails, fallback
+    try_models = [requested_model]
+    if requested_model != "gemini-1.5-flash":
+        try_models.append("gemini-1.5-flash")
+
+    last_error = None
+    for m in try_models:
+        try:
+            model_obj = genai.GenerativeModel(m)
+            st.sidebar.info(f"Using Gemini model: {m}")
+            return model_obj
+        except Exception as e:
+            last_error = e
+            # show short warning and try next
+            st.sidebar.warning(f"Could not initialize model {m}: {str(e)}. Trying fallback...")
+            time.sleep(0.5)
+
+    # if none succeeded, show error and stop
+    st.error(f"Failed to initialize Gemini model. Last error: {last_error}")
+    st.stop()
+
+# Retry helper for generate_content
+def call_generate_with_retries(model_obj, prompt, max_retries=3, initial_delay=2):
+    """
+    Calls model.generate_content(prompt) with simple exponential backoff for transient errors (429, rate limits).
+    Returns the response object or raises the last exception.
+    """
+    delay = initial_delay
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = model_obj.generate_content(prompt)
+            return response
+        except Exception as e:
+            # If it's a quota/429 like error, retry with backoff, otherwise bubble up after last try
+            msg = str(e).lower()
+            if attempt < max_retries and ("quota" in msg or "429" in msg or "rate" in msg):
+                st.sidebar.info(f"Rate/Quota error detected, retrying in {delay}s... (attempt {attempt}/{max_retries})")
+                time.sleep(delay)
+                delay *= 2
+                continue
+            # last attempt or non-retriable error
+            raise
+
+# Initialize clients
 supabase: Client = init_supabase()
 model = init_gemini()
 
+# ---------------------------
 # Helper Functions
+# ---------------------------
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -292,7 +350,14 @@ def get_room_expenses(room_id):
     except Exception as e:
         return []
 
+# ---------------------------
+# AI-driven functions with retries and safe fallbacks
+# ---------------------------
 def generate_day_plan(current_location, radius, budget, interests, additional_info):
+    # Ensure interests is a list
+    if not isinstance(interests, list):
+        interests = [interests]
+
     prompt = f"""
     Create a detailed ONE-DAY trip plan with these parameters:
     Current Location: {current_location}
@@ -351,30 +416,31 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
     
     Make sure to include realistic Indian prices and transport costs between each location.
     """
-    
+
     try:
-        response = model.generate_content(prompt)
-        text = response.text
-        
+        resp = call_generate_with_retries(model, prompt)
+        text = getattr(resp, "text", "") or str(resp)
+        # strip triple-backtick JSON fences if present
         if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
+            text = text.split("```json",1)[1].split("```",1)[0]
         elif "```" in text:
-            text = text.split("```")[1].split("```")[0]
-        
+            text = text.split("```",1)[1].split("```",1)[0]
+
         return json.loads(text.strip())
     except json.JSONDecodeError:
+        # return a safe fallback structured response (keeps app functional)
         return {
             "destinations": [{
                 "name": f"Exploring {current_location}",
                 "address": "Various locations",
-                "distance_km": radius // 2,
+                "distance_km": int(radius // 2),
                 "category": "general",
                 "time_slot": "all-day",
                 "duration": "8 hours",
                 "activities": ["Sightseeing", "Local experiences"],
-                "costs": {"entry": budget * 0.25, "food": budget * 0.35, "transport": budget * 0.25, "misc": budget * 0.15},
-                "total_cost": budget,
-                "transport_from_previous": {"mode": "Metro/Cab", "cost": budget * 0.1, "time": "30 mins"}
+                "costs": {"entry": int(budget * 0.25), "food": int(budget * 0.35), "transport": int(budget * 0.25), "misc": int(budget * 0.15)},
+                "total_cost": int(budget),
+                "transport_from_previous": {"mode": "Metro/Cab", "cost": int(budget * 0.1), "time": "30 mins"}
             }],
             "itinerary": {
                 "morning": ["9:00 AM - Start exploration"],
@@ -382,11 +448,11 @@ def generate_day_plan(current_location, radius, budget, interests, additional_in
                 "evening": ["6:00 PM - Evening activities"]
             },
             "total_budget": {
-                "transport": budget * 0.25,
-                "food": budget * 0.35,
-                "activities": budget * 0.25,
-                "miscellaneous": budget * 0.15,
-                "total": budget
+                "transport": int(budget * 0.25),
+                "food": int(budget * 0.35),
+                "activities": int(budget * 0.25),
+                "miscellaneous": int(budget * 0.15),
+                "total": int(budget)
             },
             "tips": ["Book in advance", "Check weather", "Carry cash"]
         }
@@ -409,16 +475,13 @@ def combine_plans(plans_data):
     
     Return JSON in the same format as individual plans.
     """
-    
     try:
-        response = model.generate_content(prompt)
-        text = response.text
-        
+        resp = call_generate_with_retries(model, prompt)
+        text = getattr(resp, "text", "") or str(resp)
         if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
+            text = text.split("```json",1)[1].split("```",1)[0]
         elif "```" in text:
-            text = text.split("```")[1].split("```")[0]
-        
+            text = text.split("```",1)[1].split("```",1)[0]
         return json.loads(text.strip())
     except Exception as e:
         st.error(f"Error combining plans: {e}")
@@ -441,14 +504,15 @@ def process_expense_split(message, room_expenses_context):
     
     Be conversational and clear. Format all amounts with ₹ symbol.
     """
-    
     try:
-        response = model.generate_content(prompt)
-        return response.text
+        resp = call_generate_with_retries(model, prompt)
+        return getattr(resp, "text", "") or str(resp)
     except Exception as e:
         return f"Error processing: {str(e)}"
 
-# Session State
+# ---------------------------
+# Session State and Pages
+# ---------------------------
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'user' not in st.session_state:
@@ -596,7 +660,7 @@ def planning_page():
             with col_a:
                 radius = st.number_input("Radius (km)", min_value=5, max_value=200, value=30, step=5)
             with col_b:
-                budget = st.number_input("Your Budget ($)", min_value=10, max_value=5000, value=100, step=10)
+                budget = st.number_input("Your Budget (₹)", min_value=10, max_value=5000, value=100, step=10)
             
             interests = st.multiselect(
                 "Interests",
@@ -746,7 +810,7 @@ def splitsense_page():
                     Format it clearly with proper headings and use ₹ symbol for all amounts.
                     """
                     
-                    final_split = model.generate_content(split_prompt).text
+                    final_split = call_generate_with_retries(model, split_prompt).text
                     st.session_state['final_split'] = final_split
                     st.rerun()
         
@@ -781,7 +845,6 @@ def splitsense_page():
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
-
 
 # Main Router
 def main():
