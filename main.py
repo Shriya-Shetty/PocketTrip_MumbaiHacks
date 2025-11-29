@@ -357,23 +357,26 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 def generate_day_plan(current_location, radius, budget, interests, additional_info):
-    prompt = f"""
-Create a detailed ONE-DAY trip plan with these parameters:
-Current Location: {current_location}
-Search Radius: {radius} km
-Budget: ₹{budget}
-Interests: {', '.join(interests)}
-Additional Info: {additional_info}
+    # Build prompt by concatenation to avoid f-string brace conflicts
+    intro = (
+        "Create a detailed ONE-DAY trip plan with these parameters:\n"
+        "Current Location: " + str(current_location) + "\n"
+        "Search Radius: " + str(radius) + " km\n"
+        "Budget: ₹" + str(budget) + "\n"
+        "Interests: " + ', '.join(interests) + "\n"
+        "Additional Info: " + str(additional_info) + "\n\n"
+        "Provide a JSON response with realistic costs in Indian Rupees (₹):\n"
+        "1. Exact destinations within the radius with addresses\n"
+        "2. Time-based itinerary (morning, afternoon, evening)\n"
+        "3. Detailed budget breakdown including TRAVEL COSTS (cab/auto/metro fares between locations)\n"
+        "4. Precise cost estimates for each destination\n"
+        "5. Travel time and transport costs between locations\n"
+        "6. Practical tips\n\n"
+        "Format as valid JSON (ONLY return valid JSON; do not include extra commentary):\n"
+    )
 
-Provide a JSON response with realistic costs in Indian Rupees (₹):
-1. Exact destinations within the radius with addresses
-2. Time-based itinerary (morning, afternoon, evening)
-3. Detailed budget breakdown including TRAVEL COSTS (cab/auto/metro fares between locations)
-4. Precise cost estimates for each destination
-5. Travel time and transport costs between locations
-6. Practical tips
-
-Format as valid JSON (ONLY return valid JSON; do not include extra commentary):
+    # Put the JSON schema as a plain string (not f-string), so braces are literal
+    json_schema = """
 {
     "destinations": [
         {
@@ -413,12 +416,15 @@ Format as valid JSON (ONLY return valid JSON; do not include extra commentary):
     "tips": ["Tip 1", "Tip 2"]
 }
 """
+
+    prompt = intro + json_schema
+
     try:
         text = hf_generate(prompt, max_tokens=700, temperature=0.05)
         text = _strip_code_fences(text)
         return json.loads(text.strip())
     except json.JSONDecodeError:
-        # fallback: return a safe synthetic plan
+        # fallback: return a safe synthetic plan (keeps your app resilient)
         return {
             "destinations": [{
                 "name": f"Exploring {current_location}",
@@ -451,20 +457,17 @@ Format as valid JSON (ONLY return valid JSON; do not include extra commentary):
         return None
 
 def combine_plans(plans_data):
-    prompt = f"""
-Combine these {len(plans_data)} day trip plans into one optimal merged plan:
-
-{json.dumps(plans_data, indent=2)}
-
-Create a balanced plan that:
-1. Takes best destinations from each plan
-2. Optimizes route and timing
-3. Averages budgets intelligently
-4. Removes duplicates
-5. Ensures feasibility for one day
-
-Return JSON in the same format as individual plans. ONLY return valid JSON.
-"""
+    prompt = (
+        f"Combine these {len(plans_data)} day trip plans into one optimal merged plan:\n\n"
+        + json.dumps(plans_data, indent=2)
+        + "\n\nCreate a balanced plan that:\n"
+        "1. Takes best destinations from each plan\n"
+        "2. Optimizes route and timing\n"
+        "3. Averages budgets intelligently\n"
+        "4. Removes duplicates\n"
+        "5. Ensures feasibility for one day\n\n"
+        "Return JSON in the same format as individual plans. ONLY return valid JSON.\n"
+    )
     try:
         text = hf_generate(prompt, max_tokens=700, temperature=0.05)
         text = _strip_code_fences(text)
