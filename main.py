@@ -1,10 +1,8 @@
 # app.py
-# Requirements: streamlit supabase-py requests huggingface-hub
-# env vars needed:
+# Requirements: streamlit, requests, supabase-py
+# Env vars / Streamlit secrets required:
 #   SUPABASE_URL
 #   SUPABASE_KEY
-#   HUGGINGFACE_API_TOKEN
-#   HF_MODEL_ID  (e.g. meta-llama/Llama-2-7b-chat-hf or lmsys/vicuna-7b-v1.5 or google/flan-t5-large)
 
 import streamlit as st
 import json
@@ -12,63 +10,12 @@ import os
 import hashlib
 import string
 import random
-import requests
+import urllib.parse
 from datetime import datetime
 from supabase import create_client, Client
-from typing import Optional
 
 # ---------------------------
-# HF Inference helper
-# ---------------------------
-HF_TOKEN = os.environ.get("HUGGINGFACE_API_TOKEN")
-HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "meta-llama/Llama-2-7b-chat-hf")
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
-HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-
-def hf_generate(prompt: str, max_tokens: int = 512, temperature: float = 0.1, timeout: int = 60) -> str:
-    """
-    Simple wrapper for HF Inference API text generation.
-    Works for many text-generation and instruction models. For some chat models,
-    HF accepts the same 'inputs' text; if you pick a model that requires 'messages'
-    you may need a small change to the payload (check model card).
-    """
-    if not HF_TOKEN:
-        raise RuntimeError("Hugging Face token not set in HUGGINGFACE_API_TOKEN")
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-            # "repetition_penalty": 1.03,
-            # "top_k": 50,
-        }
-    }
-    try:
-        resp = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=timeout)
-    except Exception as e:
-        raise RuntimeError(f"Request error to HF Inference API: {e}")
-
-    if resp.status_code != 200:
-        # provide helpful message
-        raise RuntimeError(f"HF API error {resp.status_code}: {resp.text}")
-
-    # HF sometimes returns [{"generated_text":"..."}] or {"generated_text":"..."} or raw text
-    try:
-        j = resp.json()
-        if isinstance(j, list) and len(j) > 0 and 'generated_text' in j[0]:
-            return j[0]['generated_text']
-        if isinstance(j, dict) and 'generated_text' in j:
-            return j['generated_text']
-        # Some endpoints return structured content differently; fallback to text
-    except ValueError:
-        # not json, return raw text
-        return resp.text
-
-    # fallback
-    return resp.text
-
-# ---------------------------
-# Streamlit page config & CSS
+# Page config & CSS
 # ---------------------------
 st.set_page_config(
     page_title="PocketTrip",
@@ -98,20 +45,12 @@ st.markdown("""
     }
     .plan-card {
         background: #f8f9fa;
-        padding: 1.5rem;
+        padding: 1.2rem;
         border-radius: 10px;
         border-left: 5px solid #667eea;
-        margin: 1rem 0;
+        margin: 0.8rem 0;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         color: #333;
-    }
-    .vote-badge {
-        background: #ffd700;
-        color: #333;
-        padding: 0.3rem 0.8rem;
-        border-radius: 15px;
-        font-weight: bold;
-        display: inline-block;
     }
     .member-badge {
         background: #e7f3ff;
@@ -121,56 +60,32 @@ st.markdown("""
         display: inline-block;
         color: #333;
     }
-    .chat-user {
-        background: #e3f2fd;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        color: #1565c0;
-        border-left: 4px solid #1976d2;
-    }
-    .chat-assistant {
-        background: #f3e5f5;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        color: #4a148c;
-        border-left: 4px solid #7b1fa2;
-    }
-    .split-summary {
-        background: #fff3e0;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        color: #e65100;
-        border: 2px solid #ff9800;
-    }
     .stButton>button {
         background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
         color: white;
         border: none;
-        padding: 0.75rem 2rem;
-        border-radius: 25px;
+        padding: 0.55rem 1.2rem;
+        border-radius: 18px;
         font-weight: bold;
-        transition: all 0.3s;
+        transition: all 0.2s;
     }
     .stButton>button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        box-shadow: 0 5px 20px rgba(102, 126, 234, 0.25);
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------
-# Initialize Supabase
+# Supabase init
 # ---------------------------
 @st.cache_resource
 def init_supabase():
     try:
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
+        url = os.environ.get("SUPABASE_URL") or (st.secrets.get("SUPABASE_URL") if hasattr(st, "secrets") else None)
+        key = os.environ.get("SUPABASE_KEY") or (st.secrets.get("SUPABASE_KEY") if hasattr(st, "secrets") else None)
         if not url or not key:
-            st.error("⚠️ Supabase credentials not found. Please configure environment variables SUPABASE_URL and SUPABASE_KEY.")
+            st.error("⚠️ Supabase credentials not found. Please configure SUPABASE_URL and SUPABASE_KEY in environment variables or Streamlit secrets.")
             st.stop()
         return create_client(url, key)
     except Exception as e:
@@ -180,7 +95,7 @@ def init_supabase():
 supabase: Client = init_supabase()
 
 # ---------------------------
-# Helper functions (passwords, rooms, users)
+# Helpers (users, rooms, plans)
 # ---------------------------
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -190,9 +105,9 @@ def generate_room_code():
 
 def authenticate_user(username, password):
     try:
-        response = supabase.table('users').select('*').eq('username', username).execute()
-        if response.data and len(response.data) > 0:
-            user = response.data[0]
+        resp = supabase.table('users').select('*').eq('username', username).execute()
+        if resp.data and len(resp.data) > 0:
+            user = resp.data[0]
             if user['password'] == hash_password(password):
                 return user
         return None
@@ -202,41 +117,30 @@ def authenticate_user(username, password):
 
 def create_user(username, password, email):
     try:
-        data = {
-            'username': username,
-            'password': hash_password(password),
-            'email': email,
-            'created_at': datetime.now().isoformat()
-        }
-        response = supabase.table('users').insert(data).execute()
-        return response.data[0] if response.data else None
+        data = {'username': username, 'password': hash_password(password), 'email': email, 'created_at': datetime.now().isoformat()}
+        resp = supabase.table('users').insert(data).execute()
+        return resp.data[0] if resp.data else None
     except Exception as e:
         st.error(f"User creation error: {e}")
         return None
 
 def create_room(creator_id, room_name, current_location):
     try:
-        room_code = generate_room_code()
-        data = {
-            'room_code': room_code,
-            'room_name': room_name,
-            'creator_id': creator_id,
-            'current_location': current_location,
-            'members': json.dumps([creator_id]),
-            'status': 'active',
-            'created_at': datetime.now().isoformat()
-        }
-        response = supabase.table('rooms').insert(data).execute()
-        return response.data[0] if response.data else None
+        code = generate_room_code()
+        data = {'room_code': code, 'room_name': room_name, 'creator_id': creator_id,
+                'current_location': current_location, 'members': json.dumps([creator_id]),
+                'status': 'active', 'created_at': datetime.now().isoformat()}
+        resp = supabase.table('rooms').insert(data).execute()
+        return resp.data[0] if resp.data else None
     except Exception as e:
         st.error(f"Room creation error: {e}")
         return None
 
 def join_room(room_code, user_id):
     try:
-        response = supabase.table('rooms').select('*').eq('room_code', room_code).execute()
-        if response.data:
-            room = response.data[0]
+        resp = supabase.table('rooms').select('*').eq('room_code', room_code).execute()
+        if resp.data:
+            room = resp.data[0]
             members = json.loads(room['members'])
             if user_id not in members:
                 members.append(user_id)
@@ -249,10 +153,9 @@ def join_room(room_code, user_id):
 
 def get_user_rooms(user_id):
     try:
-        response = supabase.table('rooms').select('*').order('created_at', desc=True).execute()
-        if response.data:
-            user_rooms = [room for room in response.data if user_id in json.loads(room['members'])]
-            return user_rooms
+        resp = supabase.table('rooms').select('*').order('created_at', desc=True).execute()
+        if resp.data:
+            return [r for r in resp.data if user_id in json.loads(r['members'])]
         return []
     except Exception as e:
         st.error(f"Error fetching rooms: {e}")
@@ -262,9 +165,9 @@ def get_room_members(room_id):
     try:
         room = supabase.table('rooms').select('members').eq('id', room_id).execute()
         if room.data:
-            member_ids = json.loads(room.data[0]['members'])
+            ids = json.loads(room.data[0]['members'])
             members = []
-            for mid in member_ids:
+            for mid in ids:
                 user = supabase.table('users').select('id, username').eq('id', mid).execute()
                 if user.data:
                     members.append(user.data[0])
@@ -275,233 +178,165 @@ def get_room_members(room_id):
 
 def save_day_plan(user_id, room_id, plan_data):
     try:
-        data = {
-            'user_id': user_id,
-            'room_id': room_id,
-            'plan_data': json.dumps(plan_data),
-            'votes': 0,
-            'created_at': datetime.now().isoformat()
-        }
-        response = supabase.table('day_plans').insert(data).execute()
-        return response.data[0] if response.data else None
+        data = {'user_id': user_id, 'room_id': room_id, 'plan_data': json.dumps(plan_data), 'votes': 0, 'created_at': datetime.now().isoformat()}
+        resp = supabase.table('day_plans').insert(data).execute()
+        return resp.data[0] if resp.data else None
     except Exception as e:
         st.error(f"Error saving plan: {e}")
         return None
 
 def get_room_plans(room_id):
     try:
-        response = supabase.table('day_plans').select('*').eq('room_id', room_id).order('created_at', desc=True).execute()
-        if response.data:
-            for plan in response.data:
-                user = supabase.table('users').select('username').eq('id', plan['user_id']).execute()
-                plan['username'] = user.data[0]['username'] if user.data else 'Unknown'
-        return response.data
+        resp = supabase.table('day_plans').select('*').eq('room_id', room_id).order('created_at', desc=True).execute()
+        if resp.data:
+            for plan in resp.data:
+                u = supabase.table('users').select('username').eq('id', plan['user_id']).execute()
+                plan['username'] = u.data[0]['username'] if u.data else 'Unknown'
+        return resp.data
     except Exception as e:
         st.error(f"Error fetching plans: {e}")
         return []
 
 def vote_plan(plan_id, user_id):
     try:
-        vote_check = supabase.table('plan_votes').select('*').eq('plan_id', plan_id).eq('user_id', user_id).execute()
-        if vote_check.data:
+        check = supabase.table('plan_votes').select('*').eq('plan_id', plan_id).eq('user_id', user_id).execute()
+        if check.data:
             st.warning("You already voted for this plan!")
             return False
-
         supabase.table('plan_votes').insert({'plan_id': plan_id, 'user_id': user_id}).execute()
-
         plan = supabase.table('day_plans').select('votes').eq('id', plan_id).execute()
-        current_votes = plan.data[0]['votes'] if plan.data else 0
-        supabase.table('day_plans').update({'votes': current_votes + 1}).eq('id', plan_id).execute()
+        current = plan.data[0]['votes'] if plan.data else 0
+        supabase.table('day_plans').update({'votes': current + 1}).eq('id', plan_id).execute()
         return True
     except Exception as e:
         st.error(f"Error voting: {e}")
         return False
 
+# ---------------------------
+# Dummy plan & maps helper
+# ---------------------------
+def generate_dummy_plan(current_location, radius, budget, interests, additional_info):
+    """
+    Deterministic Powai plan using the exact times & activities you provided.
+    Returns a dict matching the JSON schema used elsewhere in the app.
+    """
+    destinations = [
+        {"name": "Vihar Lake viewpoint", "address": "Vihar Lake, Powai, Mumbai", "distance_km": 2, "category": "nature", "time_slot": "07:30-08:15", "duration": "45 mins", "activities": ["Sunrise stroll"], "costs": {"entry": 0, "food": 0, "transport": 50, "misc": 0}, "total_cost": 50},
+        {"name": "Powai Biodiversity Park", "address": "Powai Biodiversity Park, Powai, Mumbai", "distance_km": 3, "category": "nature", "time_slot": "08:30-10:15", "duration": "1h45m", "activities": ["Nature walk"], "costs": {"entry": 0, "food": 0, "transport": 60, "misc": 0}, "total_cost": 60},
+        {"name": "Powai Lake boating + promenade", "address": "Powai Lake, Powai, Mumbai", "distance_km": 1, "category": "relaxation", "time_slot": "10:30-12:00", "duration": "1h30m", "activities": ["Boating", "Promenade"], "costs": {"entry": 200, "food": 0, "transport": 50, "misc": 0}, "total_cost": 250},
+        {"name": "Lunch (Hiranandani / Powai)", "address": "Hiranandani Gardens, Powai, Mumbai", "distance_km": 1, "category": "food", "time_slot": "12:15-13:15", "duration": "1h", "activities": ["Lunch"], "costs": {"entry": 0, "food": 400, "transport": 30, "misc": 0}, "total_cost": 430},
+        {"name": "Powai Lake Trail & small hill trek", "address": "Powai Lake Trail, Powai, Mumbai", "distance_km": 3, "category": "adventure", "time_slot": "13:30-15:30", "duration": "2h", "activities": ["Trail & small hill trek"], "costs": {"entry": 0, "food": 0, "transport": 60, "misc": 0}, "total_cost": 60},
+        {"name": "Indoor climbing (High Rock, Powai)", "address": "High Rock Climbing, Powai, Mumbai", "distance_km": 4, "category": "adventure", "time_slot": "16:00-17:30", "duration": "1h30m", "activities": ["Indoor climbing"], "costs": {"entry": 500, "food": 0, "transport": 80, "misc": 0}, "total_cost": 580},
+        {"name": "Sunset at Powai Lake promenade", "address": "Powai Lake Promenade, Powai, Mumbai", "distance_km": 1, "category": "relaxation", "time_slot": "18:00-19:00", "duration": "1h", "activities": ["Sunset view"], "costs": {"entry": 0, "food": 0, "transport": 40, "misc": 0}, "total_cost": 40},
+        {"name": "Dinner / return to Chandivali", "address": "Chandivali, Mumbai", "distance_km": 5, "category": "food", "time_slot": "19:00-20:00", "duration": "1h", "activities": ["Dinner", "Return"], "costs": {"entry": 0, "food": 300, "transport": 120, "misc": 0}, "total_cost": 420},
+    ]
+
+    itinerary = {
+        "morning": ["07:30–08:15 — Vihar Lake viewpoint (sunrise stroll)",
+                    "08:30–10:15 — Powai Biodiversity Park (nature walk)",
+                    "10:30–12:00 — Powai Lake boating + promenade"],
+        "afternoon": ["12:15–13:15 — Lunch (Hiranandani / Powai)",
+                      "13:30–15:30 — Powai Lake Trail & small hill trek"],
+        "evening": ["16:00–17:30 — Indoor climbing (High Rock, Powai)",
+                    "18:00–19:00 — Sunset at Powai Lake promenade",
+                    "19:00–20:00 — Dinner / return to Chandivali"]
+    }
+
+    total_budget = {
+        "transport": sum(d["costs"]["transport"] for d in destinations),
+        "food": sum(d["costs"]["food"] for d in destinations),
+        "activities": sum(d["costs"]["entry"] for d in destinations),
+        "miscellaneous": sum(d["costs"]["misc"] for d in destinations),
+    }
+    total_budget["total"] = total_budget["transport"] + total_budget["food"] + total_budget["activities"] + total_budget["miscellaneous"]
+
+    plan = {
+        "destinations": destinations,
+        "itinerary": itinerary,
+        "total_budget": total_budget,
+        "tips": ["Carry water", "Wear comfortable shoes for the trek", "Book boating time if needed"]
+    }
+    return plan
+
+def build_google_maps_directions(origin, destinations_list):
+    """
+    Builds a google maps directions URL:
+    origin: string
+    destinations_list: list of destination dicts with 'address' fields (ordered)
+    We'll set final destination to the last address and waypoints to intermediate addresses.
+    """
+    if not destinations_list:
+        return None
+    # Clean and encode addresses
+    addresses = [d.get("address", d.get("name", "")) for d in destinations_list if d.get("address") or d.get("name")]
+    # If origin is same as final (return), we can set destination to origin; otherwise set destination to last address
+    destination = addresses[-1]
+    waypoints = addresses[:-1]  # all but last
+    params = {
+        "api": "1",
+        "origin": origin,
+        "destination": destination
+    }
+    if waypoints:
+        # waypoints separated by | and must be URL encoded
+        wp = "|".join([urllib.parse.quote_plus(w) for w in waypoints])
+        params["waypoints"] = wp
+    # Build base url
+    base = "https://www.google.com/maps/dir/?"
+    query = "&".join([f"{k}={urllib.parse.quote_plus(str(v))}" for k, v in params.items()])
+    return base + query
+
+# ---------------------------
+# Replaced generate_day_plan -> uses dummy plan
+# ---------------------------
+def generate_day_plan(current_location, radius, budget, interests, additional_info):
+    # For now, return the deterministic Powai dummy plan regardless of interests
+    return generate_dummy_plan(current_location, radius, budget, interests, additional_info)
+
+def combine_plans(plans_data):
+    # Simple combine: pick destinations unique by name, keep itinerary of first plan
+    merged = {"destinations": [], "itinerary": {}, "total_budget": {"transport":0,"food":0,"activities":0,"miscellaneous":0,"total":0}, "tips": []}
+    seen = set()
+    for p in plans_data:
+        try:
+            plan = p if isinstance(p, dict) else json.loads(p)
+        except Exception:
+            continue
+        for d in plan.get("destinations", []):
+            if d.get("name") not in seen:
+                merged["destinations"].append(d)
+                seen.add(d.get("name"))
+        # add budgets
+        tb = plan.get("total_budget", {})
+        for k in ["transport","food","activities","miscellaneous"]:
+            merged["total_budget"][k] = merged["total_budget"].get(k,0) + int(tb.get(k,0) or 0)
+    merged["total_budget"]["total"] = merged["total_budget"]["transport"] + merged["total_budget"]["food"] + merged["total_budget"]["activities"] + merged["total_budget"]["miscellaneous"]
+    merged["tips"] = ["Combined plan - review timings"]
+    return merged
+
+# ---------------------------
+# Expenses (simple store/display)
+# ---------------------------
 def save_expense_message(room_id, user_id, message, response_text):
     try:
-        data = {
-            'room_id': room_id,
-            'user_id': user_id,
-            'message': message,
-            'response': response_text,
-            'created_at': datetime.now().isoformat()
-        }
+        data = {'room_id': room_id, 'user_id': user_id, 'message': message, 'response': response_text, 'created_at': datetime.now().isoformat()}
         supabase.table('split_expenses').insert(data).execute()
     except Exception as e:
         st.error(f"Error saving expense: {e}")
 
 def get_room_expenses(room_id):
     try:
-        response = supabase.table('split_expenses').select('*').eq('room_id', room_id).order('created_at', desc=False).execute()
-        if response.data:
-            for exp in response.data:
-                user = supabase.table('users').select('username').eq('id', exp['user_id']).execute()
-                exp['username'] = user.data[0]['username'] if user.data else 'Unknown'
-        return response.data
-    except Exception as e:
+        resp = supabase.table('split_expenses').select('*').eq('room_id', room_id).order('created_at', desc=False).execute()
+        if resp.data:
+            for e in resp.data:
+                u = supabase.table('users').select('username').eq('id', e['user_id']).execute()
+                e['username'] = u.data[0]['username'] if u.data else 'Unknown'
+        return resp.data or []
+    except Exception:
         return []
 
 # ---------------------------
-# AI usage: replaced Gemini calls with hf_generate()
-# ---------------------------
-
-def _strip_code_fences(text: str) -> str:
-    if not text:
-        return text
-    if "```json" in text:
-        parts = text.split("```json")
-        return parts[1].split("```")[0] if len(parts) > 1 and "```" in parts[1] else parts[1]
-    if "```" in text:
-        parts = text.split("```")
-        return parts[1] if len(parts) > 1 else parts[0]
-    return text
-
-def generate_day_plan(current_location, radius, budget, interests, additional_info):
-    # Build prompt by concatenation to avoid f-string brace conflicts
-    intro = (
-        "Create a detailed ONE-DAY trip plan with these parameters:\n"
-        "Current Location: " + str(current_location) + "\n"
-        "Search Radius: " + str(radius) + " km\n"
-        "Budget: ₹" + str(budget) + "\n"
-        "Interests: " + ', '.join(interests) + "\n"
-        "Additional Info: " + str(additional_info) + "\n\n"
-        "Provide a JSON response with realistic costs in Indian Rupees (₹):\n"
-        "1. Exact destinations within the radius with addresses\n"
-        "2. Time-based itinerary (morning, afternoon, evening)\n"
-        "3. Detailed budget breakdown including TRAVEL COSTS (cab/auto/metro fares between locations)\n"
-        "4. Precise cost estimates for each destination\n"
-        "5. Travel time and transport costs between locations\n"
-        "6. Practical tips\n\n"
-        "Format as valid JSON (ONLY return valid JSON; do not include extra commentary):\n"
-    )
-
-    # Put the JSON schema as a plain string (not f-string), so braces are literal
-    json_schema = """
-{
-    "destinations": [
-        {
-            "name": "Place Name",
-            "address": "Full address",
-            "distance_km": 15,
-            "category": "nature/food/culture",
-            "time_slot": "morning/afternoon/evening",
-            "duration": "2 hours",
-            "activities": ["Activity 1", "Activity 2"],
-            "costs": {
-                "entry": 200,
-                "food": 300,
-                "transport": 150,
-                "misc": 100
-            },
-            "total_cost": 750,
-            "transport_from_previous": {
-                "mode": "Metro/Cab/Auto",
-                "cost": 150,
-                "time": "30 mins"
-            }
-        }
-    ],
-    "itinerary": {
-        "morning": ["9:00 AM - Activity 1", "11:00 AM - Activity 2"],
-        "afternoon": ["1:00 PM - Lunch", "3:00 PM - Activity 3"],
-        "evening": ["6:00 PM - Activity 4", "8:00 PM - Dinner"]
-    },
-    "total_budget": {
-        "transport": 500,
-        "food": 800,
-        "activities": 600,
-        "miscellaneous": 200,
-        "total": 2100
-    },
-    "tips": ["Tip 1", "Tip 2"]
-}
-"""
-
-    prompt = intro + json_schema
-
-    try:
-        text = hf_generate(prompt, max_tokens=700, temperature=0.05)
-        text = _strip_code_fences(text)
-        return json.loads(text.strip())
-    except json.JSONDecodeError:
-        # fallback: return a safe synthetic plan (keeps your app resilient)
-        return {
-            "destinations": [{
-                "name": f"Exploring {current_location}",
-                "address": "Various locations",
-                "distance_km": radius // 2,
-                "category": "general",
-                "time_slot": "all-day",
-                "duration": "8 hours",
-                "activities": ["Sightseeing", "Local experiences"],
-                "costs": {"entry": int(budget * 0.25), "food": int(budget * 0.35), "transport": int(budget * 0.25), "misc": int(budget * 0.15)},
-                "total_cost": int(budget),
-                "transport_from_previous": {"mode": "Metro/Cab", "cost": int(budget * 0.1), "time": "30 mins"}
-            }],
-            "itinerary": {
-                "morning": ["9:00 AM - Start exploration"],
-                "afternoon": ["1:00 PM - Lunch & activities"],
-                "evening": ["6:00 PM - Evening activities"]
-            },
-            "total_budget": {
-                "transport": int(budget * 0.25),
-                "food": int(budget * 0.35),
-                "activities": int(budget * 0.25),
-                "miscellaneous": int(budget * 0.15),
-                "total": int(budget)
-            },
-            "tips": ["Book in advance", "Check weather", "Carry cash"]
-        }
-    except Exception as e:
-        st.error(f"Error generating plan: {e}")
-        return None
-
-def combine_plans(plans_data):
-    prompt = (
-        f"Combine these {len(plans_data)} day trip plans into one optimal merged plan:\n\n"
-        + json.dumps(plans_data, indent=2)
-        + "\n\nCreate a balanced plan that:\n"
-        "1. Takes best destinations from each plan\n"
-        "2. Optimizes route and timing\n"
-        "3. Averages budgets intelligently\n"
-        "4. Removes duplicates\n"
-        "5. Ensures feasibility for one day\n\n"
-        "Return JSON in the same format as individual plans. ONLY return valid JSON.\n"
-    )
-    try:
-        text = hf_generate(prompt, max_tokens=700, temperature=0.05)
-        text = _strip_code_fences(text)
-        return json.loads(text.strip())
-    except Exception as e:
-        st.error(f"Error combining plans: {e}")
-        return None
-
-def process_expense_split(message, room_expenses_context):
-    prompt = f"""
-You are SplitSense AI for group expense splitting. Use Indian Rupees (₹) for all amounts.
-
-Previous expenses in this room:
-{json.dumps(room_expenses_context, indent=2)}
-
-New message: {message}
-
-Parse the expense and:
-1. Extract: amount in ₹, who paid, who shares the cost
-2. Calculate equal splits
-3. Update running balances
-4. Show who owes whom in ₹
-
-Be conversational and clear. Format all amounts with ₹ symbol.
-ONLY RETURN THE EXPLANATION / RESULT AS PLAIN TEXT (no JSON required).
-"""
-    try:
-        text = hf_generate(prompt, max_tokens=400, temperature=0.0)
-        return text
-    except Exception as e:
-        return f"Error processing: {e}"
-
-# ---------------------------
-# Session state and UI pages (same logic as original)
+# Session state & UI pages
 # ---------------------------
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -565,7 +400,7 @@ def rooms_page():
         st.markdown("### 🆕 Create New Room")
         with st.form("create_room"):
             room_name = st.text_input("Trip Name", placeholder="Weekend Getaway")
-            current_loc = st.text_input("Starting Location", placeholder="Mumbai, India")
+            current_loc = st.text_input("Starting Location", placeholder="Chandivali, Mumbai")
             create = st.form_submit_button("Create Room", use_container_width=True)
             if create and room_name and current_loc:
                 room = create_room(st.session_state.user['id'], room_name, current_loc)
@@ -630,7 +465,7 @@ def planning_page():
         with st.form("day_plan_form"):
             col_a, col_b = st.columns(2)
             with col_a:
-                radius = st.number_input("Radius (km)", min_value=5, max_value=200, value=30, step=5)
+                radius = st.number_input("Radius (km)", min_value=1, max_value=200, value=30, step=1)
             with col_b:
                 budget = st.number_input("Your Budget (₹)", min_value=100, max_value=50000, value=2000, step=100)
             interests = st.multiselect(
@@ -641,15 +476,10 @@ def planning_page():
             additional_info = st.text_area("Additional Info", placeholder="Dietary restrictions, mobility needs, preferences...")
             generate = st.form_submit_button("🚀 Generate My Plan", use_container_width=True)
             if generate and interests:
-                with st.spinner("Creating your plan..."):
+                with st.spinner("Creating your plan... (using local dummy plan)"):
                     plan = generate_day_plan(room['current_location'], radius, budget, interests, additional_info or "None")
                     if plan:
-                        plan['user_preferences'] = {
-                            'radius': radius,
-                            'budget': budget,
-                            'interests': interests,
-                            'additional_info': additional_info
-                        }
+                        plan['user_preferences'] = {'radius': radius, 'budget': budget, 'interests': interests, 'additional_info': additional_info}
                         saved = save_day_plan(st.session_state.user['id'], room['id'], plan)
                         if saved:
                             st.success("Plan created! Check 'All Plans' tab.")
@@ -660,22 +490,30 @@ def planning_page():
         plans = get_room_plans(room['id'])
         if plans:
             for plan in plans:
-                plan_data = json.loads(plan['plan_data'])
+                try:
+                    plan_data = json.loads(plan['plan_data'])
+                except Exception:
+                    plan_data = {}
                 with st.expander(f"🗺️ {plan['username']}'s Plan - Votes: {plan['votes']}", expanded=False):
                     col_a, col_b = st.columns([3, 1])
                     with col_a:
                         if 'destinations' in plan_data:
                             st.markdown("**Destinations:**")
-                            for dest in plan_data['destinations']:
-                                st.markdown(f"📍 **{dest['name']}** ({dest.get('distance_km', '?')} km)")
-                                st.caption(f"Time: {dest.get('time_slot', 'TBD')} | Cost: ₹{dest.get('total_cost', 0)}")
+                            for idx, dest in enumerate(plan_data['destinations']):
+                                st.markdown(f"📍 **{dest.get('name','Unknown')}** — {dest.get('time_slot','TBD')}")
+                                st.caption(f"Address: {dest.get('address','N/A')} | Cost: ₹{dest.get('total_cost',0)}")
                         if 'total_budget' in plan_data:
                             st.markdown("**Budget Breakdown:**")
-                            budget = plan_data['total_budget']
-                            cols = st.columns(len(budget))
-                            for idx, (cat, amt) in enumerate(budget.items()):
-                                cols[idx].metric(cat.title(), f"₹{amt}")
+                            tb = plan_data['total_budget']
+                            cols = st.columns(len(tb))
+                            for i, (cat, amt) in enumerate(tb.items()):
+                                cols[i].metric(cat.title(), f"₹{amt}")
                     with col_b:
+                        # Find Location link
+                        if 'destinations' in plan_data and plan_data['destinations']:
+                            maps_url = build_google_maps_directions(room['current_location'], plan_data['destinations'])
+                            if maps_url:
+                                st.markdown(f"[🔎 Find Location on Google Maps]({maps_url})", unsafe_allow_html=True)
                         if st.button("👍 Vote", key=f"vote_{plan['id']}", use_container_width=True):
                             if vote_plan(plan['id'], st.session_state.user['id']):
                                 st.success("Voted!")
@@ -689,7 +527,12 @@ def planning_page():
         if len(plans) >= 2:
             if st.button("🔄 Combine All Plans", use_container_width=True, type="primary"):
                 with st.spinner("Merging everyone's ideas..."):
-                    plans_data = [json.loads(p['plan_data']) for p in plans]
+                    plans_data = []
+                    for p in plans:
+                        try:
+                            plans_data.append(json.loads(p['plan_data']))
+                        except Exception:
+                            continue
                     combined = combine_plans(plans_data)
                     if combined:
                         st.session_state['combined_plan'] = combined
@@ -699,7 +542,7 @@ def planning_page():
                 if 'destinations' in combined:
                     st.markdown("### 🗺️ Merged Destinations")
                     for dest in combined['destinations']:
-                        st.markdown(f'<div class="plan-card"><strong>{dest["name"]}</strong><br>📍 {dest.get("address", "N/A")}<br>⏰ {dest.get("time_slot", "TBD")} | 💰 ₹{dest.get("total_cost", 0)}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="plan-card"><strong>{dest.get("name","Unknown")}</strong><br>📍 {dest.get("address", "N/A")}<br>⏰ {dest.get("time_slot", "TBD")} | 💰 ₹{dest.get("total_cost", 0)}</div>', unsafe_allow_html=True)
                 if 'total_budget' in combined:
                     st.markdown("### 💰 Combined Budget")
                     cols = st.columns(len(combined['total_budget']))
@@ -727,43 +570,31 @@ def splitsense_page():
             message = st.text_input("Enter expense", placeholder="I paid ₹500 for lunch, split among 4 people")
             send = st.form_submit_button("Send", use_container_width=True)
             if send and message:
-                with st.spinner("Processing..."):
-                    context = [{'user': e['username'], 'message': e['message'], 'response': e['response']} for e in expenses]
-                    response = process_expense_split(message, context)
-                    save_expense_message(room['id'], st.session_state.user['id'], message, response)
-                    st.rerun()
+                # For now we echo message as response (no LLM)
+                response = f"Recorded: {message}"
+                save_expense_message(room['id'], st.session_state.user['id'], message, response)
+                st.rerun()
         st.divider()
         if st.button("📊 Calculate Split", use_container_width=True, type="primary"):
+            expenses = get_room_expenses(room['id'])
             if expenses:
-                with st.spinner("Calculating final splits..."):
-                    members = get_room_members(room['id'])
-                    member_names = [m['username'] for m in members]
-                    split_prompt = f"""
-Based on all these expense messages, calculate the final settlement for everyone:
-
-Room members: {', '.join(member_names)}
-
-Expense history:
-{json.dumps([{'user': e['username'], 'message': e['message']} for e in expenses], indent=2)}
-
-Provide a clear summary in Indian Rupees (₹):
-1. Total expenses
-2. Each person's share
-3. Who owes whom and exact amounts
-4. Simplified settlements (minimize number of transactions)
-
-Format it clearly with proper headings and use ₹ symbol for all amounts.
-"""
-                    final_split = hf_generate(split_prompt, max_tokens=400, temperature=0.0)
-                    st.session_state['final_split'] = final_split
-                    st.rerun()
-        if 'final_split' in st.session_state and st.session_state.get('final_split'):
-            st.markdown("---")
-            st.markdown("### 💰 Final Settlement Summary")
-            st.markdown(f'<div class="split-summary">{st.session_state["final_split"]}</div>', unsafe_allow_html=True)
-            if st.button("✅ Clear Settlement", use_container_width=True):
-                st.session_state['final_split'] = None
-                st.rerun()
+                # Very simple settlement summary (equal split)
+                members = get_room_members(room['id'])
+                member_names = [m['username'] for m in members]
+                # Sum numeric amounts found in messages (naive parse)
+                total = 0
+                for e in expenses:
+                    # find ₹ amounts in message text
+                    msg = e.get('message','')
+                    # simple parse: extract digits sequences
+                    import re
+                    nums = re.findall(r'₹\s*([0-9]+)', msg)
+                    for n in nums:
+                        total += int(n)
+                avg = total / max(1, len(member_names))
+                st.markdown("---")
+                st.markdown(f"**Total recorded (naive parse):** ₹{int(total)}")
+                st.markdown(f"**Each should pay (equal):** ₹{int(avg)}")
     with col2:
         st.markdown("### 💡 Quick Guide")
         st.info("💬 Examples:\n\n- 'I paid ₹500 for tickets'\n- 'Split ₹800 among 3 people'\n- 'Rahul owes me ₹250'\n- 'What's everyone's balance?'")
@@ -775,8 +606,6 @@ Format it clearly with proper headings and use ₹ symbol for all amounts.
         if st.button("🗑️ Clear All Expenses", use_container_width=True):
             try:
                 supabase.table('split_expenses').delete().eq('room_id', room['id']).execute()
-                if 'final_split' in st.session_state:
-                    st.session_state['final_split'] = None
                 st.success("All expenses cleared!")
                 st.rerun()
             except Exception as e:
