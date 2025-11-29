@@ -105,12 +105,12 @@ st.markdown("""
 
 logging.basicConfig(level=logging.INFO)
 
-# --- Initialization helpers for Supabase and Hugging Face (HF Router) ---
+# ---------- Supabase init ----------
 @st.cache_resource
 def init_supabase():
     try:
-        url = os.environ.get("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY")
+        url = os.environ.get("SUPABASE_URL") or (st.secrets.get("SUPABASE_URL") if hasattr(st, "secrets") else None)
+        key = os.environ.get("SUPABASE_KEY") or (st.secrets.get("SUPABASE_KEY") if hasattr(st, "secrets") else None)
         if not url or not key:
             st.error("⚠️ Supabase credentials not found. Please configure environment variables or Streamlit secrets.")
             st.stop()
@@ -119,29 +119,45 @@ def init_supabase():
         st.error(f"Error connecting to Supabase: {e}")
         st.stop()
 
+# ---------- Hugging Face (free-tier-focused) ----------
 @st.cache_resource
 def init_hf():
     """
-    Use the new Hugging Face Router endpoint:
-    https://router.huggingface.co/hf-inference/models/<model-id>
+    Read HF API key and optional HF_MODEL. Ensure API key present.
     """
-    api_key = os.environ.get("HF_API_KEY") or st.secrets.get("HF_API_KEY")
-    model = os.environ.get("HF_MODEL") or st.secrets.get("HF_MODEL") or "google/flan-t5-large"
+    api_key = os.environ.get("HF_API_KEY") or (st.secrets.get("HF_API_KEY") if hasattr(st, "secrets") else None)
+    preferred = os.environ.get("HF_MODEL") or (st.secrets.get("HF_MODEL") if hasattr(st, "secrets") else None)
     if not api_key:
-        st.error("⚠️ Hugging Face API key not found. Please configure HF_API_KEY in Streamlit secrets or environment variables.")
+        st.error("⚠️ Hugging Face API key not found. Please configure HF_API_KEY in Streamlit secrets or environment variables (free tier token is fine).")
         st.stop()
-    # Build router URL for the model
-    api_url = f"https://router.huggingface.co/hf-inference/models/{model}"
-    return {"api_key": api_key, "model": model, "api_url": api_url}
+    return {"api_key": api_key, "preferred": preferred}
 
-def hf_generate(prompt, max_length=1024, temperature=0.2, retries=2, retry_delay=1.0):
+def hf_generate(prompt, max_length=256, temperature=0.2, retries=1, retry_delay=1.0):
     """
-    Call Hugging Face Router (hf-inference) endpoint for the configured model.
-    The router endpoint routes to providers and supports the same 'inputs' payload.
-    Returns string output from model or raises.
+    HF Router caller tuned for free/smaller models.
+    Tries a short list of community/free models that typically don't require gated access.
     """
     cfg = init_hf()
-    headers = {"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"}
+    api_key = cfg["api_key"]
+    preferred = cfg.get("preferred")
+
+    # Prefer user's choice first, then try small/free models
+    candidates = []
+    if preferred:
+        candidates.append(preferred)
+
+    # Free / small instruction-following models (safer for free quota)
+    # Order: smallest/fastest first
+    candidates += [
+        "google/flan-t5-small",
+        "google/flan-t5-base",
+        "sshleifer/tiny-gpt2",
+        "google/flan-t5-large",
+        "facebook/bart-large-cnn"
+    ]
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    # Keep payload compact for free-tier reliability
     payload = {
         "inputs": prompt,
         "parameters": {
@@ -152,57 +168,64 @@ def hf_generate(prompt, max_length=1024, temperature=0.2, retries=2, retry_delay
         "options": {"wait_for_model": True}
     }
 
-    url = cfg["api_url"]
-    # Some models support chat endpoints (e.g., /v1/chat/completions). For simplicity we call the model root.
-    for attempt in range(retries + 1):
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=90)
-            if resp.status_code == 200:
-                # try JSON parse
-                try:
-                    data = resp.json()
-                    # Common HF router responses:
-                    #  - list with {'generated_text': "..."}
-                    #  - dict with 'generated_text'
-                    #  - plain dict (structured)
-                    #  - fallback to resp.text
-                    if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-                        return data[0]["generated_text"]
-                    if isinstance(data, dict) and "generated_text" in data:
-                        return data["generated_text"]
-                    # If it's a dict with choices/messages (chat-like), try to extract
-                    if isinstance(data, dict) and "choices" in data and isinstance(data["choices"], list) and "message" in data["choices"][0]:
-                        msg = data["choices"][0]["message"]
-                        if isinstance(msg, dict) and "content" in msg:
-                            # Some responses are {content: [{type: "text", text: "..."}]}
-                            content = msg["content"]
-                            if isinstance(content, list) and len(content) > 0:
-                                # join text pieces
-                                texts = [c.get("text","") for c in content if isinstance(c, dict)]
-                                return " ".join(texts).strip()
-                            if isinstance(content, dict) and "text" in content:
-                                return content["text"]
-                    # If we didn't find known keys, fallback to returning the JSON string
-                    return json.dumps(data)
-                except ValueError:
-                    return resp.text.strip()
-            else:
-                # Helpful error message for 410 -> routing change
-                if resp.status_code == 410:
-                    raise Exception(f"Hugging Face API error 410: {resp.text}")
-                # 402 payment required, 404 model not found etc — surface with explanation
-                msg = f"Hugging Face API error {resp.status_code}: {resp.text}"
-                logging.warning(msg)
+    diagnostics = []
+    for model in candidates:
+        url = f"https://router.huggingface.co/hf-inference/models/{model}"
+        st.info(f"Trying HF model: `{model}`")
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                status = resp.status_code
+                text_snippet = (resp.text or "")[:1200]
+                diagnostics.append({"model": model, "status": status, "text": text_snippet})
+                if status == 200:
+                    # Best-effort parsing of common shapes
+                    try:
+                        data = resp.json()
+                        if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
+                            return data[0]["generated_text"]
+                        if isinstance(data, dict) and "generated_text" in data:
+                            return data["generated_text"]
+                        if isinstance(data, dict) and "choices" in data and isinstance(data["choices"], list):
+                            choice = data["choices"][0]
+                            if isinstance(choice, dict):
+                                if "message" in choice and isinstance(choice["message"], dict):
+                                    msg = choice["message"]
+                                    content = msg.get("content")
+                                    if isinstance(content, list):
+                                        texts = [c.get("text","") for c in content if isinstance(c, dict)]
+                                        return " ".join(texts).strip()
+                                    if isinstance(content, dict):
+                                        return content.get("text","")
+                                if "text" in choice:
+                                    return choice["text"]
+                        # fallback to raw text
+                        return resp.text.strip()
+                    except ValueError:
+                        return resp.text.strip()
+                else:
+                    if attempt < retries:
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                    else:
+                        break
+            except requests.exceptions.RequestException as e:
+                diagnostics.append({"model": model, "error": str(e)})
                 if attempt < retries:
                     time.sleep(retry_delay * (attempt + 1))
                     continue
-                raise Exception(msg)
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"RequestException on attempt {attempt}: {e}")
-            if attempt < retries:
-                time.sleep(retry_delay * (attempt + 1))
-                continue
-            raise
+                break
+
+    # Nothing worked: show diagnostics and raise
+    err_lines = ["Hugging Face Router attempts failed. Diagnostics:"]
+    for d in diagnostics:
+        if "status" in d:
+            err_lines.append(f"- model={d['model']} status={d['status']} resp_snippet={d['text']!r}")
+        else:
+            err_lines.append(f"- model={d['model']} error={d.get('error')}")
+    full_msg = "\n".join(err_lines)
+    st.error(full_msg)
+    raise Exception(full_msg)
 
 def extract_json_from_text(text):
     """
@@ -231,9 +254,9 @@ def extract_json_from_text(text):
 
 # --- Initialize Supabase and HF config (cached) ---
 supabase: Client = init_supabase()
-hf_config = init_hf()  # ensure HF key and model present
+_ = init_hf()  # ensure HF key present
 
-# --- Remaining app helpers (unchanged logic, using hf_generate where needed) ---
+# --- Helper functions (unchanged logic) ---
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -393,7 +416,7 @@ def get_room_expenses(room_id):
     except Exception as e:
         return []
 
-# --- HF-powered plan generation / combination / expense processing (use hf_generate) ---
+# --- HF-powered plan generation / combination / expense processing ---
 def generate_day_plan(current_location, radius, budget, interests, additional_info):
     prompt = f"""
 Create a detailed ONE-DAY trip plan with these parameters:
@@ -414,7 +437,8 @@ Provide a JSON response with realistic costs in Indian Rupees (₹):
 Return ONLY valid JSON (no extra commentary).
 """
     try:
-        response_text = hf_generate(prompt, max_length=1024)
+        # use a bit larger max_length for structured JSON outputs
+        response_text = hf_generate(prompt, max_length=512)
         parsed = extract_json_from_text(response_text)
         if parsed:
             return parsed
@@ -450,12 +474,7 @@ Return ONLY valid JSON (no extra commentary).
                 "tips": ["Book in advance", "Check weather", "Carry cash"]
             }
     except Exception as e:
-        # Special-case if HF router returns 410 message, show clearer guidance
-        msg = str(e)
-        if "router.huggingface.co" in msg or "api-inference.huggingface.co" in msg:
-            st.error(f"Error generating plan: {msg}\n\nHint: ensure your HF_API_KEY is valid and that your account has access/credits for the chosen model. You may need to pick a different HF_MODEL or enable billing.")
-        else:
-            st.error(f"Error generating plan: {msg}")
+        st.error(f"Error generating plan: {e}")
         return None
 
 def combine_plans(plans_data):
@@ -466,7 +485,7 @@ Plans:
 {json.dumps(plans_data, indent=2)}
 """
     try:
-        response_text = hf_generate(prompt, max_length=1024)
+        response_text = hf_generate(prompt, max_length=512)
         parsed = extract_json_from_text(response_text)
         if parsed:
             return parsed
@@ -498,7 +517,7 @@ Be conversational and clear. Format all amounts with ₹ symbol.
 If possible, return a short JSON summary and then a human-readable explanation.
 """
     try:
-        response_text = hf_generate(prompt, max_length=512)
+        response_text = hf_generate(prompt, max_length=256)
         return response_text
     except Exception as e:
         return f"Error processing: {str(e)}"
@@ -760,7 +779,7 @@ Provide a clear summary in Indian Rupees (₹):
 Format it clearly with headings and use ₹ symbol for all amounts.
 """
                     try:
-                        final_split = hf_generate(split_prompt, max_length=1024)
+                        final_split = hf_generate(split_prompt, max_length=512)
                         st.session_state['final_split'] = final_split
                         st.rerun()
                     except Exception as e:
